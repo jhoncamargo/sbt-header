@@ -19,25 +19,27 @@ package de.heikoseeberger.sbtheader
 import de.heikoseeberger.sbtheader.CommentStyle.cStyleBlockComment
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Files
-
 import sbt.{
   AutoPlugin,
   Compile,
   Configuration,
   File,
   Logger,
+  ScopeFilter,
   Setting,
   SettingKey,
   TaskKey,
   Test,
+  inAnyConfiguration,
   inConfig,
   settingKey,
   taskKey
 }
 import sbt.Defaults.collectFiles
 import sbt.Keys._
+import sbt.internal.util.MessageOnlyException
 import sbt.plugins.JvmPlugin
-
+import sbt.util.FileFunction
 import scala.util.matching.Regex
 
 object HeaderPlugin extends AutoPlugin {
@@ -83,8 +85,14 @@ object HeaderPlugin extends AutoPlugin {
     val headerCreate: TaskKey[Iterable[File]] =
       taskKey[Iterable[File]]("Create/update headers")
 
+    val headerCreateAll: TaskKey[Iterable[File]] =
+      taskKey[Iterable[File]]("Create/update headers in all configurations")
+
     val headerCheck: TaskKey[Iterable[File]] =
       taskKey[Iterable[File]]("Check whether files have headers")
+
+    val headerCheckAll: TaskKey[Iterable[File]] =
+      taskKey[Iterable[File]]("Check whether files have headers in all configurations")
 
     def headerSettings(configurations: Configuration*): Seq[Setting[_]] =
       configurations.foldLeft(List.empty[Setting[_]]) { _ ++ inConfig(_)(toBeScopedSettings) }
@@ -103,62 +111,85 @@ object HeaderPlugin extends AutoPlugin {
   private def toBeScopedSettings =
     Vector(
       headerSources := collectFiles(
-        unmanagedSourceDirectories.in(headerCreate),
-        includeFilter.in(headerSources),
-        excludeFilter.in(headerSources)
-      ).value,
+          unmanagedSourceDirectories.in(headerCreate),
+          includeFilter.in(headerSources),
+          excludeFilter.in(headerSources)
+        ).value,
       headerResources := collectFiles(
-        unmanagedResourceDirectories.in(headerCreate),
-        includeFilter.in(headerResources),
-        excludeFilter.in(headerResources)
-      ).value,
+          unmanagedResourceDirectories.in(headerCreate),
+          includeFilter.in(headerResources),
+          excludeFilter.in(headerResources)
+        ).value,
       headerCreate := createHeadersTask(
-        headerSources.value.toList ++
-        headerResources.value.toList,
-        headerLicense.value.getOrElse(sys.error("Unable to auto detect project license")),
-        headerMappings.value,
-        headerEmptyLine.value,
-        streams.value.log
-      ),
+          streams.value.cacheDirectory,
+          headerSources.value.toList ++
+          headerResources.value.toList,
+          headerLicense.value.getOrElse(sys.error("Unable to auto detect project license")),
+          headerMappings.value,
+          headerEmptyLine.value,
+          streams.value.log
+        ),
+      headerCreateAll := headerCreate.?.all(ScopeFilter(configurations = inAnyConfiguration)).value.flatten.flatten.toSet,
       headerCheck := checkHeadersTask(
-        headerSources.value.toList ++
-        headerResources.value.toList,
-        headerLicense.value.getOrElse(sys.error("Unable to auto detect project license")),
-        headerMappings.value,
-        headerEmptyLine.value,
-        streams.value.log
-      )
+          headerSources.value.toList ++
+          headerResources.value.toList,
+          headerLicense.value.getOrElse(sys.error("Unable to auto detect project license")),
+          headerMappings.value,
+          headerEmptyLine.value,
+          streams.value.log
+        ),
+      headerCheckAll := headerCheck.?.all(ScopeFilter(configurations = inAnyConfiguration)).value.flatten.flatten.toSet
     )
 
   private def notToBeScopedSettings =
     Vector(
       headerMappings := Map(
-        FileType.scala -> cStyleBlockComment,
-        FileType.java  -> cStyleBlockComment
-      ),
-      headerLicense := LicenseDetection(licenses.value.toList,
-                                        organizationName.value,
-                                        startYear.value),
+          FileType.scala -> cStyleBlockComment,
+          FileType.java  -> cStyleBlockComment
+        ),
+      headerLicense := LicenseDetection(
+          licenses.value.toList,
+          organizationName.value,
+          startYear.value
+        ),
       includeFilter.in(headerSources) := includeFilter.in(unmanagedSources).value,
       excludeFilter.in(headerSources) := excludeFilter.in(unmanagedSources).value,
       includeFilter.in(headerResources) := includeFilter.in(unmanagedResources).value,
       excludeFilter.in(headerResources) := excludeFilter.in(unmanagedResources).value
     )
 
-  private def createHeadersTask(files: Seq[File],
-                                headerLicense: License,
-                                headerMappings: Map[FileType, CommentStyle],
-                                headerEmptyLine: Boolean,
-                                log: Logger) = {
+  private def createHeadersTask(
+      cacheDirectory: File,
+      files: Seq[File],
+      headerLicense: License,
+      headerMappings: Map[FileType, CommentStyle],
+      headerEmptyLine: Boolean,
+      log: Logger
+  ): Iterable[File] =
+    FileFunction.cached(cacheDirectory) { files =>
+      if (files.nonEmpty)
+        createHeaders(files, headerLicense, headerMappings, headerEmptyLine, log)
+      else Set.empty
+    }(files.toSet)
+
+  private def createHeaders(
+      files: Set[File],
+      headerLicense: License,
+      headerMappings: Map[FileType, CommentStyle],
+      headerEmptyLine: Boolean,
+      log: Logger
+  ): Set[File] = {
     def createHeader(fileType: FileType, commentStyle: CommentStyle)(file: File) = {
       def write(text: String) = Files.write(file.toPath, text.getBytes(UTF_8)).toFile
       log.debug(s"About to create/update header for $file")
-      HeaderCreator(fileType,
-                    commentStyle,
-                    headerLicense,
-                    headerEmptyLine,
-                    log,
-                    Files.newInputStream(file.toPath)).createText
+      HeaderCreator(
+        fileType,
+        commentStyle,
+        headerLicense,
+        headerEmptyLine,
+        log,
+        Files.newInputStream(file.toPath)
+      ).createText
         .map(write)
     }
     val touchedFiles =
@@ -171,21 +202,25 @@ object HeaderPlugin extends AutoPlugin {
       log.info(
         s"Headers created for ${touchedFiles.size} files:$newLine  ${touchedFiles.mkString(s"$newLine  ")}"
       )
-    touchedFiles
+    touchedFiles.toSet
   }
 
-  private def checkHeadersTask(files: Seq[File],
-                               headerLicense: License,
-                               headerMappings: Map[FileType, CommentStyle],
-                               headerEmptyLine: Boolean,
-                               log: Logger) = {
+  private def checkHeadersTask(
+      files: Seq[File],
+      headerLicense: License,
+      headerMappings: Map[FileType, CommentStyle],
+      headerEmptyLine: Boolean,
+      log: Logger
+  ) = {
     def checkHeader(fileType: FileType, commentStyle: CommentStyle)(file: File) =
-      HeaderCreator(fileType,
-                    commentStyle,
-                    headerLicense,
-                    headerEmptyLine,
-                    log,
-                    Files.newInputStream(file.toPath)).createText
+      HeaderCreator(
+        fileType,
+        commentStyle,
+        headerLicense,
+        headerEmptyLine,
+        log,
+        Files.newInputStream(file.toPath)
+      ).createText
         .map(_ => file)
     val filesWithoutHeader =
       groupFilesByFileTypeAndCommentStyle(files, headerMappings)
@@ -194,16 +229,18 @@ object HeaderPlugin extends AutoPlugin {
             groupedFiles.flatMap(checkHeader(fileType, commentStyle))
         }
     if (filesWithoutHeader.nonEmpty)
-      sys.error(
+      throw new MessageOnlyException(
         s"""|There are files without headers!
             |  ${filesWithoutHeader.mkString(s"$newLine  ")}
             |""".stripMargin
       )
-    filesWithoutHeader
+    else Nil
   }
 
-  private def groupFilesByFileTypeAndCommentStyle(files: Seq[File],
-                                                  headerMappings: Map[FileType, CommentStyle]) =
+  private def groupFilesByFileTypeAndCommentStyle(
+      files: Iterable[File],
+      headerMappings: Map[FileType, CommentStyle]
+  ) =
     files
       .groupBy(_.extension)
       .collect {

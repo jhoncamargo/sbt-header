@@ -48,15 +48,19 @@ trait CommentCreator {
 
 object CommentStyle {
 
-  val cStyleBlockComment = CommentStyle(new CommentBlockCreator("/*", " *", " */"),
-                                        commentBetween("""/\*+""", "*", """\*/"""))
+  val cStyleBlockComment = CommentStyle(
+    new CommentBlockCreator("/*", " *", " */"),
+    commentBetween("""/\*+""", "*", """\*/""")
+  )
 
   val cppStyleLineComment = CommentStyle(new LineCommentCreator("//"), commentStartingWith("//"))
 
   val hashLineComment = CommentStyle(new LineCommentCreator("#"), commentStartingWith("#"))
 
-  val twirlStyleBlockComment = CommentStyle(new CommentBlockCreator("@*", " *", " *@"),
-                                            commentBetween("""@\*""", "*", """\*@"""))
+  val twirlStyleBlockComment = CommentStyle(
+    new CommentBlockCreator("@*", " *", " *@"),
+    commentBetween("""@\*""", "*", """\*@""")
+  )
 
   val twirlStyleFramedBlockComment =
     CommentStyle(TwirlStyleFramedBlockCommentCreator, commentBetween("""@\*+""", "*", """\*@"""))
@@ -69,12 +73,12 @@ object CommentStyle {
 object TwirlStyleFramedBlockCommentCreator extends CommentCreator {
 
   def apply(text: String, existingText: Option[String]): String = {
-    val maxLineLength = text.lines.map(_.length).max
+    val maxLineLength = text.linesIterator.map(_.length).max
 
     def fillLine(line: String) =
       " * " + line + spaces(maxLineLength - line.length) + " *"
 
-    val commentBlock = text.lines.map(fillLine).mkString(newLine)
+    val commentBlock = text.linesIterator.map(fillLine).mkString(newLine)
     val firstLine    = "@**" + stars(maxLineLength + 2)
     val lastLine     = " " + firstLine.reverse
 
@@ -95,7 +99,7 @@ final class LineCommentCreator(linePrefix: String) extends CommentCreator {
         case line => linePrefix + " " + line
       }
 
-    text.lines.map(prependWithLinePrefix).mkString(newLine)
+    text.linesIterator.map(prependWithLinePrefix).mkString(newLine)
   }
 }
 
